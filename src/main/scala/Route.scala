@@ -4,7 +4,7 @@ object Route {
     val name: String
   }
 
-  val a: Int = "1"
+  val a: Int = 1
 // object Named {
 //   def apply[A](value: String) = new Named[A] {
 //     val name: String = value
