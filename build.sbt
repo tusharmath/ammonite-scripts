@@ -4,4 +4,9 @@ lazy val root = project
     name := "scala3-simple",
     version := "0.1.0",
     scalaVersion := "2.13.6",
+    libraryDependencies :=
+      Seq(
+        "dev.zio" %% "zio"         % "1.0.8",
+        "dev.zio" %% "zio-streams" % "1.0.8",
+      ),
   )
