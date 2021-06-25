@@ -1,6 +1,3 @@
-// scala 2.13.3
-// ammonite 2.2.0
-
 type ?>[-A, +B] = PartialFunction[A, B]
 
 object FreeCommandOps {
