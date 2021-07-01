@@ -1,7 +1,10 @@
 package response
 
 import zio.stream.ZStream
-import zio.ZIO
+import zio.{console, ZIO}
+import zio.console.Console
+
+import java.io.IOException
 
 object Response_16 {
 
@@ -19,6 +22,7 @@ object Response_16 {
   type Opaque
   type UHttp[-A, +B]               = Http[Any, Nothing, A, B]
   type HttpChannel[-R, +E, -A, +B] = Http[R, E, Event[A], Operation[R, E, B]]
+  type MultipartAttribute
 
 /// --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
 
@@ -62,17 +66,7 @@ object Response_16 {
     def data[R, E, A1 <: A](content: Content[R, E, A1]): Out[R, E]
   }
 
-  sealed trait Content[-R, +E, +A] { self =>
-    def data[A1 >: A](implicit ev: HasData[A1]): ev.Out[R, E] = ev.data(self)
-  }
-
   sealed trait Event[+A]
-
-  sealed trait Operation[-R, +E, +D] { self =>
-    def ++[R1 <: R, E1 >: E, D1 >: D](other: Operation[R1, E1, D1]): Operation[R1, E1, D1] = self andThen other
-
-    def andThen[R1 <: R, E1 >: E, D1 >: D](other: Operation[R1, E1, D1]): Operation[R1, E1, D1] = ???
-  }
 
   sealed trait Request[-R, +E, A] { self =>
     def method: Method
@@ -94,8 +88,18 @@ object Response_16 {
   /**
    * Used to decode request body
    */
-  sealed trait DecodeMap[A, B] {
+  sealed trait ContentChannel[A, B] { self =>
     val channelHandler: JChannelHandler
+  }
+
+  object ContentChannel {
+    val byteBuf = new ContentChannel[ByteBuf, ByteBuf] {
+      override val channelHandler: JChannelHandler = ???
+    }
+
+    def upload[R, E] = new ContentChannel[MultipartAttribute, Response[R, E, Opaque]] {
+      override val channelHandler: JChannelHandler = ???
+    }
   }
 
   trait Http[-R, +E, -A, +B] {
@@ -172,27 +176,22 @@ object Response_16 {
     }
   }
 
-  object Content {
+  sealed trait Content[-R, +E, +A] { self =>
+    def data[A1 >: A](implicit ev: HasData[A1]): ev.Out[R, E] = ev.data(self)
+  }
+  object Content                   {
     def fromByteBuf(data: ByteBuf): Content[Any, Nothing, Complete] = CompleteContent(data)
 
     def fromStream[R, E](data: ZStream[R, E, ByteBuf]): Content[R, E, Buffered] = BufferedContent(data)
 
     def empty: Content[Any, Nothing, Opaque] = EmptyContent
 
-    def collect[A]: MkContent[A] = ???
+    def fromChannel[R, E, A, B](d: ContentChannel[A, B], ch: HttpChannel[R, E, A, B]): Content[R, E, Opaque] = FromChannel(d, ch)
 
-    final case class CompleteContent(bytes: ByteBuf) extends Content[Any, Nothing, Complete]
-
-    final case class BufferedContent[R, E](source: ZStream[R, E, ByteBuf]) extends Content[R, E, Buffered]
-
-    final case class ContentHandler[R, A, B](d: DecodeMap[A, B], ch: HttpChannel[R, Nothing, A, B]) extends Content[R, Nothing, Opaque]
-
-    final class MkContent[A]() {
-      def apply[R, E, B](pf: PartialFunction[Event[A], Operation[R, Nothing, B]])(implicit d: DecodeMap[A, B]): Content[R, Nothing, Opaque] =
-        ContentHandler(d, HttpChannel.collect(pf))
-    }
-
-    case object EmptyContent extends Content[Any, Nothing, Opaque]
+    final case class CompleteContent(bytes: ByteBuf)                                               extends Content[Any, Nothing, Complete]
+    final case class BufferedContent[R, E](source: ZStream[R, E, ByteBuf])                         extends Content[R, E, Buffered]
+    final case class FromChannel[R, E, A, B](d: ContentChannel[A, B], ch: HttpChannel[R, E, A, B]) extends Content[R, E, Opaque]
+    case object EmptyContent                                                                       extends Content[Any, Nothing, Opaque]
   }
 
   object Event {
@@ -203,30 +202,27 @@ object Response_16 {
     case object Complete extends Event[Nothing]
   }
 
-  object Operation {
-    def empty: Operation[Any, Nothing, Nothing] = Empty
+  sealed trait Operation[-R, +E, +D] { self =>
+    def ++[R1 <: R, E1 >: E, D1 >: D](other: Operation[R1, E1, D1]): Operation[R1, E1, D1] = self andThen other
 
-    def close: Operation[Any, Nothing, Nothing] = Empty
-
-    def read: Operation[Any, Nothing, Nothing] = Read
-
-    def write[D](data: D): Operation[Any, Nothing, D] = Write(data)
-
-    def fromEffect[R, E](effect: ZIO[R, E, Any]): Operation[R, E, Any] = FromEffect(effect)
-
-    def updateChannel[R, A, B](ch: HttpChannel[R, Nothing, A, B])(implicit d: DecodeMap[A, B]): Operation[R, Nothing, Nothing] = Update(d, ch)
+    def andThen[R1 <: R, E1 >: E, D1 >: D](other: Operation[R1, E1, D1]): Operation[R1, E1, D1] = ???
+  }
+  object Operation                   {
+    def empty: Operation[Any, Nothing, Nothing]                            = Empty
+    def close: Operation[Any, Nothing, Nothing]                            = Empty
+    def read: Operation[Any, Nothing, Nothing]                             = Read
+    def flush: Operation[Any, Nothing, Nothing]                            = Flush
+    def write[D](data: D): Operation[Any, Nothing, D]                      = Write(data)
+    def fromEffect[R, E](effect: ZIO[R, E, Any]): Operation[R, E, Nothing] = FromEffect(effect)
+    def restore: Operation[Any, Nothing, Nothing]                          = Restore
 
     case class FromEffect[R, E](effect: ZIO[R, E, Any]) extends Operation[R, E, Nothing]
-
-    case class Write[D](data: D) extends Operation[Any, Nothing, D]
-
-    case class Update[R, E, A, B](d: DecodeMap[A, B], ch: HttpChannel[R, Nothing, A, B]) extends Operation[R, E, Nothing]
-
-    case object Read extends Operation[Any, Nothing, Nothing]
-
-    case object Close extends Operation[Any, Nothing, Nothing]
-
-    case object Empty extends Operation[Any, Nothing, Nothing]
+    case class Write[D](data: D)                        extends Operation[Any, Nothing, D]
+    case object Read                                    extends Operation[Any, Nothing, Nothing]
+    case object Flush                                   extends Operation[Any, Nothing, Nothing]
+    case object Close                                   extends Operation[Any, Nothing, Nothing]
+    case object Empty                                   extends Operation[Any, Nothing, Nothing]
+    case object Restore                                 extends Operation[Any, Nothing, Nothing]
   }
 
   object Request {
@@ -245,9 +241,11 @@ object Response_16 {
     def apply[R, E, A](status: Status = Status.Ok, headers: List[Header] = Nil, content: Content[R, E, A] = Content.empty): Response[R, E, A] =
       Default(status, headers, content)
 
-    final case class Default[R, E, A](dStatus: Status, dHeaders: List[Header], dContent: Content[R, E, A]) extends Response[R, E, A]
+    def fromChannel[R, E, A, B](d: ContentChannel[A, B], ch: HttpChannel[R, E, A, B]): Response[R, E, Opaque] = FromChannel(d, ch)
 
-    final case class Socket(server: SocketServer[Any, Nothing]) extends Response[Any, Nothing, Opaque]
+    final case class Default[R, E, A](dStatus: Status, dHeaders: List[Header], dContent: Content[R, E, A]) extends Response[R, E, A]
+    final case class Socket(server: SocketServer[Any, Nothing])                                            extends Response[Any, Nothing, Opaque]
+    final case class FromChannel[R, E, A, B](d: ContentChannel[A, B], ch: HttpChannel[R, E, A, B])         extends Response[R, E, Opaque]
   }
 
   object HttpChannel {
@@ -257,20 +255,37 @@ object Response_16 {
     }
   }
 
-  object DecodeMap {
-    implicit val raw = new DecodeMap[ByteBuf, ByteBuf] {
-      override val channelHandler: JChannelHandler = ???
-    }
-  }
-
   object Example {
     import Event._
-    val echo = Response(
+
+    def autoFlush[A]: HttpChannel[Any, Nothing, A, Nothing]                    =
+      HttpChannel.collect[A] { case Complete => Operation.flush }
+
+    def autoRead[A]: HttpChannel[Any, Nothing, A, Nothing]                     =
+      HttpChannel.collect[A] { case Complete => Operation.read }
+
+    def autoClose[A]: HttpChannel[Any, Nothing, A, Nothing]                    =
+      HttpChannel.collect[A] { case Read(_, true) => Operation.close }
+
+    val echo: HttpChannel[Any, Nothing, ByteBuf, ByteBuf]                      =
+      HttpChannel.collect[ByteBuf] { case Read(msg, _) => Operation.write(msg) }
+
+    val upload: HttpChannel[Console, IOException, MultipartAttribute, Nothing] =
+      HttpChannel.collect[MultipartAttribute] {
+        case Read(msg, _) => Operation.fromEffect(console.putStrLn(msg.toString))
+        case Complete     => Operation.read
+      }
+
+    def ok[A]: HttpChannel[Any, Nothing, A, Response[Any, Nothing, Opaque]] =
+      HttpChannel.collect[A] { case Read(_, true) => Operation.write(Response(Status.Ok)) }
+
+    // Simply echos the response
+    val echoResponse                                                        = Response(
       status = Status.Ok,
-      content = Content.collect[ByteBuf] {
-        case Read(msg, isLast) => Operation.write(msg) ++ (if (isLast) Operation.close else Operation.empty)
-        case Complete          => Operation.read
-      },
+      content = Content.fromChannel(ContentChannel.byteBuf, echo +++ autoFlush +++ autoClose +++ autoRead),
     )
+
+    // Sends a 200 response after the file is uploaded
+    val multipartResponse = Response.fromChannel(ContentChannel.upload, upload +++ ok)
   }
 }
